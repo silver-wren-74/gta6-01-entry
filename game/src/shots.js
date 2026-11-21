@@ -1,79 +1,108 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=cover|city|mission|drive. Each one
+// arranges the real game state — Dario, cars, officers, heat, an objective —
+// the way a moment of play would, steps the world a few times so tyres,
+// walkers and light bars settle, and leaves the frame for main to paint.
+// Same seed, same frame: the staging draws only from the state's rng.
+import { LANDMARKS } from './city.js';
+import { makeCar } from './vehicles.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function putPlayerInCar(state, type, x, y, angle, vx = 0, vy = 0, color = null) {
+  const car = makeCar(state.rng, type, x, y, angle, 'player');
+  if (color) car.color = color;
+  car.vx = vx;
+  car.vy = vy;
+  state.cars.push(car);
+  state.player.car = car;
+  state.player.x = x;
+  state.player.y = y;
+  return car;
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function addCopCar(state, x, y, angle) {
+  const car = makeCar(state.rng, 'cop', x, y, angle, 'cop');
+  state.cars.push(car);
+  state.cops.push({ kind: 'car', car, down: 0 });
+  return car;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+function addFootCop(state, x, y, angle) {
+  state.cops.push({ kind: 'foot', x, y, angle, health: 60, fireCd: 1.4, down: 0, bob: 0 });
+}
+
+function addTraffic(state, type, x, y, angle) {
+  const car = makeCar(state.rng, type, x, y, angle, 'parked');
+  state.cars.push(car);
+  return car;
+}
+
+/** Stage the named scene on a freshly built state. Unknown names stage 'city'. */
+export function stageShot(state, name) {
+  const p = state.player;
+  state.screen = 'play';
+  if (name === 'cover') {
+    // The Comet run: gold sport car, three stars, two Interceptors behind,
+    // the chop shop marker across the map — the whole game in one frame.
+    const car = putPlayerInCar(state, 'sport', 1560, 1043, 0.12, 305, 18, '#f4d35e');
+    car.isMissionCar = true;
+    state.missionCar = car;
+    addCopCar(state, 1330, 1043, 0.05);
+    addCopCar(state, 1235, 997, -0.06);
+    addTraffic(state, 'taxi', 1980, 997, Math.PI);
+    addTraffic(state, 'sedan', 1900, 1043, 0);
+    state.heat = 3;
+    state.seenNow = true;
+    const at = LANDMARKS.chopShop;
+    state.objective = { x: at.x, y: at.y, label: 'Deliver the Comet to Reyes Chop Shop', color: '#ff5d8f', dist: 1900 };
+    p.money = 400;
+  } else if (name === 'mission') {
+    // Pier 9: covering the Tide Runner's crew, hold timer half gone, the
+    // PSPD arriving down the coast road.
+    p.x = 210;
+    p.y = 1546;
+    p.aim = 0.5;
+    addCopCar(state, 474, 1470, Math.PI / 2);
+    addFootCop(state, 330, 1505, Math.PI);
+    addTraffic(state, 'van', 474, 1830, -Math.PI / 2);
+    state.heat = 2;
+    state.seenNow = true;
+    const at = LANDMARKS.pier;
+    state.objective = { x: at.x, y: at.y, label: 'Cover the crew while they cast off', color: '#ff5d8f', dist: 60, holdPct: 0.55 };
+    state.missionCard = {
+      title: 'Mission 5 — Neon Tide',
+      lines: ['Vera: Keep them off the pier until the lines are cast.'],
+      t: 7,
+    };
+    p.money = 4300;
+  } else if (name === 'drive') {
+    // Flat out down the coast road in a borrowed sedan, courier clock running.
+    putPlayerInCar(state, 'sedan', 474, 1690, Math.PI / 2, 8, 385, '#3e7cb1');
+    addTraffic(state, 'truck', 447, 1470, Math.PI / 2);
+    addTraffic(state, 'sport', 497, 1420, Math.PI / 2);
+    addCopCar(state, 447, 1930, Math.PI / 2);
+    state.heat = 1;
+    state.seenNow = true;
+    const at = LANDMARKS.hotelMarlin;
+    state.objective = { x: at.x, y: at.y, label: 'Deliver to Hotel Marlin — 32s', color: '#57cc5e', dist: 2450 };
+    p.money = 1250;
+    // A breath of tyre smoke behind the rear wheels.
+    for (let i = 0; i < 10; i += 1) {
+      state.particles.push({
+        x: 474 + state.rng.range(-9, 9), y: 1650 - i * 7,
+        vx: state.rng.range(-8, 8), vy: state.rng.range(-16, -4),
+        life: state.rng.range(0, 0.4), maxLife: 1.2, color: '#3a3f47', kind: 'smoke', size: 7,
+      });
+    }
+  } else {
+    // 'city': on foot downtown at the morning rush, rooftops on every side,
+    // traffic on both avenues, and Vera's first marker waiting across town.
+    p.x = 2206;
+    p.y = 954;
+    p.aim = 0.3;
+    addTraffic(state, 'taxi', 2293, 1180, Math.PI / 2);
+    addTraffic(state, 'sedan', 1850, 1043, 0);
+    addTraffic(state, 'sport', 2247, 700, -Math.PI / 2);
+    const at = LANDMARKS.start;
+    state.objective = { x: at.x, y: at.y, label: "Meet Vera's contact — First Run", color: '#ffd166', dist: 1655 };
+    p.money = 120;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
 }
